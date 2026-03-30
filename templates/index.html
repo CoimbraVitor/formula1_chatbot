@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+  <head>
+    <meta charset="UTF-8" />
+    <title>F1 Chatbot</title>
+
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body
+    class="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-700 h-screen flex items-center justify-center"
+  >
+    <div
+      class="w-full max-w-md bg-gray-900 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+    >
+      <!-- Header -->
+      <div class="bg-red-600 text-white text-center p-4 font-bold text-lg">
+        🏎️ F1 Chatbot
+      </div>
+
+      <!-- Chat -->
+      <div
+        id="messages"
+        class="flex flex-col gap-2 p-4 h-96 overflow-y-auto bg-gray-800 text-white"
+      ></div>
+
+      <!-- Input -->
+      <div class="flex border-t border-gray-700">
+        <input
+          id="input"
+          type="text"
+          placeholder="Digite sua mensagem..."
+          class="flex-1 p-3 bg-gray-900 text-white outline-none"
+        />
+        <button
+          onclick="sendMessage()"
+          class="bg-red-600 hover:bg-red-700 px-4 text-white font-semibold"
+        >
+          Enviar
+        </button>
+      </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+  </body>
+</html>
