@@ -1,7 +1,9 @@
 const input = document.getElementById("input");
 const messages = document.getElementById("messages");
+const button = document.querySelector("button");
 
 let dark = false;
+let isLoading = false;
 
 function addMessage(text, type) {
   const div = document.createElement("div");
@@ -32,11 +34,26 @@ function removeTyping() {
   if (typing) typing.remove();
 }
 
+function setLoading(state) {
+  isLoading = state;
+  input.disabled = state;
+  button.disabled = state;
+
+  if (state) {
+    button.classList.add("opacity-50", "cursor-not-allowed");
+  } else {
+    button.classList.remove("opacity-50", "cursor-not-allowed");
+  }
+}
+
 function sendMessage(textParam = null) {
+  if (isLoading) return;
+
   const text = textParam || input.value;
   if (!text) return;
 
   addMessage(text, "user");
+  setLoading(true);
   showTyping();
 
   fetch("/chat", {
@@ -48,6 +65,7 @@ function sendMessage(textParam = null) {
     .then((data) => {
       removeTyping();
       addMessage(data.response, "bot");
+      setLoading(false);
     });
 
   input.value = "";
@@ -65,13 +83,8 @@ function toggleTheme() {
   const body = document.getElementById("body");
   dark = !dark;
 
-  if (dark) {
-    body.classList.remove("bg-white");
-    body.classList.add("bg-gray-900");
-  } else {
-    body.classList.remove("bg-gray-900");
-    body.classList.add("bg-white");
-  }
+  body.classList.toggle("bg-gray-900", dark);
+  body.classList.toggle("bg-white", !dark);
 }
 
 window.onload = () => {
