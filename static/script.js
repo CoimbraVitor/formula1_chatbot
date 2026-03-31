@@ -7,15 +7,7 @@ let isLoading = false;
 
 function addMessage(text, type) {
   const div = document.createElement("div");
-
-  if (type === "user") {
-    div.className =
-      "self-end bg-blue-500 text-white px-4 py-2 rounded-xl max-w-[75%]";
-  } else {
-    div.className =
-      "self-start bg-green-500 text-white px-4 py-2 rounded-xl max-w-[75%]";
-  }
-
+  div.className = `message ${type === "user" ? "message-user" : "message-bot"}`;
   div.innerText = text;
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
@@ -24,9 +16,9 @@ function addMessage(text, type) {
 function showTyping() {
   const div = document.createElement("div");
   div.id = "typing";
-  div.className = "self-start bg-gray-400 text-white px-4 py-2 rounded-xl";
-  div.innerText = "Digitando...";
+  div.innerText = "Calculando telemetria...";
   messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
 }
 
 function removeTyping() {
@@ -37,25 +29,18 @@ function removeTyping() {
 function setLoading(state) {
   isLoading = state;
   input.disabled = state;
-  button.disabled = state;
-
-  if (state) {
-    button.classList.add("opacity-50", "cursor-not-allowed");
-  } else {
-    button.classList.remove("opacity-50", "cursor-not-allowed");
-  }
+  const sendBtn = document.querySelector(".send-btn");
+  sendBtn.disabled = state;
+  sendBtn.style.opacity = state ? "0.5" : "1";
 }
 
 function sendMessage(textParam = null) {
   if (isLoading) return;
 
   const text = textParam !== null ? textParam : input.value;
-
-  if (!text) return;
+  if (!text.trim()) return;
 
   addMessage(text, "user");
-
-  // 🔥 LIMPA SEMPRE
   input.value = "";
 
   setLoading(true);
@@ -68,28 +53,36 @@ function sendMessage(textParam = null) {
   })
     .then((res) => res.json())
     .then((data) => {
-      const delay = Math.min(3000, 800 + data.response.length * 20);
+      const delay = Math.min(2500, 600 + data.response.length * 15);
 
       setTimeout(() => {
         removeTyping();
         addMessage(data.response, "bot");
         setLoading(false);
       }, delay);
+    })
+    .catch(() => {
+      removeTyping();
+      addMessage("Ops, houve uma falha na telemetria. Tente novamente!", "bot");
+      setLoading(false);
     });
 }
+
 input.addEventListener("keypress", function (e) {
   if (e.key === "Enter") sendMessage();
 });
 
 function toggleTheme() {
   const body = document.getElementById("body");
+  const btn = document.querySelector(".theme-toggle");
   dark = !dark;
 
-  body.classList.toggle("bg-gray-900", dark);
-  body.classList.toggle("bg-white", !dark);
+  body.className = dark ? "bg-gray-900" : "bg-white";
+  btn.innerText = dark ? "☀️" : "🌙";
 }
 
 window.onload = () => {
+  // Start with dark mode for premium feel if you want, but default is light
   addMessage(
     "Olá! 👋 Que bom ter você por aqui. Sou seu assistente especializado em Fórmula 1!\n\nPodemos conversar sobre a história da categoria, as tecnologias incríveis como o DRS, as estratégias de pit stop ou sobre os grandes pilotos. Por onde gostaria de começar nosso papo?",
     "bot"
