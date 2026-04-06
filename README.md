@@ -51,10 +51,29 @@ Este projeto é voltado para:
 - Entusiastas de análise de dados esportivos
 - Desenvolvedores interessados em aplicações com dados esportivos
 
-## 🚀 Possibilidades Futuras
+## Tecnologias utilizadas
+- Python
+- Flask
+- NLTK
+- HTML/CSS/JavaScript
 
-- Integração com APIs de linguagem natural
-- Dashboard com visualização de dados (gráficos de telemetria)
-- Comparações avançadas entre pilotos
+## Como executar
+1. Clone o repositório
+2. Crie um ambiente virtual
+3. Instale as dependências:
+   pip install -r requirements.txt
+4. Execute:
+   python app.py
+
+## Estrutura do projeto
+- `app.py`: inicialização da aplicação Flask
+- `chatbot/engine.py`: lógica principal do chatbot
+- `templates/`: interface HTML
+- `static/`: arquivos estáticos
+
+## Funcionalidades atuais
+- Interface web de chat
+- Respostas baseadas em padrões
+- Contexto básico de conversa sobre Fórmula 1
 - Integração com plataformas como Discord ou Telegram
 - Atualizações em tempo real durante corridas
