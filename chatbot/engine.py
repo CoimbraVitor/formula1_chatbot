@@ -177,7 +177,11 @@ class F1Chatbot:
                 response = llm_answer
 
         next_hook = self._get_next_hook()
-
+        response = response.rstrip()
+        if response and response[-1] not in ".!?":
+            response += "."
+        
+        
         connectors = [
             "\n\nMas me diga uma coisa: ",
             " Por sinal, ",
