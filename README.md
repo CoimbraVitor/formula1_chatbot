@@ -40,8 +40,57 @@ O fluxo básico do chatbot segue os seguintes passos:
 
 1. O usuário faz uma pergunta (ex: “Quem venceu o GP de Mônaco de 2023?”)
 2. O chatbot interpreta a intenção da pergunta
-3. O sistema consulta os dados através do FastF1
-4. A resposta é processada e retornada ao usuário de forma clara
+3. O sistema consulta primeiro a base local estruturada em `data/`
+4. Se a base local não tiver informação suficiente, o LLM é usado como fallback
+5. A resposta é processada e retornada ao usuário de forma clara
+
+No código, os dados importados ficam organizados em camadas:
+
+- **Bronze:** leitura direta dos arquivos `.parquet`
+- **Silver:** normalização de tipos, nomes, datas, posições e pontuação
+- **ABT local:** tabela analítica usada para treinar a predição do campeão de pilotos
+
+## 🤖 LLM utilizado
+
+O fallback generativo usa o modelo [`Qwen/Qwen2.5-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct), disponível no Hugging Face.
+
+Esse modelo foi mantido porque é uma boa escolha para o contexto do trabalho: é pequeno o bastante para rodar localmente em máquinas comuns, é ajustado para seguir instruções, tem suporte a português e lida bem com dados estruturados no prompt. Modelos maiores, como `Qwen/Qwen2.5-3B-Instruct`, podem responder melhor, mas aumentam bastante o custo de memória e tempo de execução para um projeto de faculdade.
+
+Para testar outro modelo compatível com `transformers`, execute definindo a variável:
+
+```bash
+F1_LLM_MODEL_ID="Qwen/Qwen2.5-3B-Instruct" python app.py
+```
+
+### Download do modelo
+
+Ao executar `python app.py`, o projeto baixa/carrega o modelo do Hugging Face antes de iniciar o Flask. Para evitar limite de requisições anônimas e melhorar a velocidade, crie um token de leitura em <https://huggingface.co/settings/tokens> e autentique uma vez no terminal:
+
+```bash
+huggingface-cli login
+```
+
+Também é possível usar variável de ambiente diretamente no terminal:
+
+```bash
+export HF_TOKEN=hf_seu_token_aqui
+python app.py
+```
+
+Se quiser cancelar um download em andamento, pressione `Ctrl+C` no terminal. Ao executar novamente, o Hugging Face normalmente reaproveita o que já ficou em cache e continua o download.
+
+## 🏆 Predição do campeonato de pilotos
+
+O chatbot consegue projetar o próximo campeão de pilotos usando um modelo treinado localmente com os dados importados via FastF1.
+
+Perguntas sugeridas:
+
+- `Prever campeão do campeonato de pilotos`
+- `Classificação dos pilotos em 2026`
+
+A previsão segue a ideia do projeto [`speed-f1`](https://github.com/TeoMeWhy/speed-f1), mas sem Spark, MLflow ou armazenamento em nuvem. A aplicação monta uma ABT com pandas e treina uma `RandomForestClassifier` local usando temporadas anteriores. A resposta ao usuário fica em linguagem natural, sem expor detalhes internos de arquivos ou pipeline.
+
+Além da conversa, a interface possui uma aba **Dashboard** com a predição do campeão, barras comparando os principais candidatos, classificação atual, vencedores recentes e vitórias por equipe.
 
 ## 👥 Público-Alvo
 
@@ -54,7 +103,9 @@ Este projeto é voltado para:
 ## Tecnologias utilizadas
 - Python
 - Flask
-- NLTK
+- Pandas
+- scikit-learn
+- Transformers
 - HTML/CSS/JavaScript
 
 ## Como executar
@@ -73,7 +124,8 @@ Este projeto é voltado para:
 
 ## Funcionalidades atuais
 - Interface web de chat
-- Respostas baseadas em padrões
+- Conversa livre com LLM local como fallback
+- Consulta prévia à base estruturada de F1
+- Predição local do campeonato de pilotos
+- Dashboard com gráfico de predição e recortes estatísticos
 - Contexto básico de conversa sobre Fórmula 1
-- Integração com plataformas como Discord ou Telegram
-- Atualizações em tempo real durante corridas

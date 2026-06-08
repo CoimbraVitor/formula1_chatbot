@@ -1,50 +1,17 @@
 import random
 import re
-from nltk.chat.util import Chat
 
 from chatbot.llm_client import query_llm
-from chatbot.data_loader import build_data_context
-from chatbot.intents import get_f1_intents
-from chatbot.reflections import get_reflections
+from chatbot.data_loader import build_knowledge_base
 from chatbot.hooks import get_f1_hooks
-
-
-_NLTK_GENUINE_PREFIXES = (
-    "olá!", "oi pessoal!", "seja muito bem-vindo",
-    "lewis hamilton", "max verstappen", "ayrton senna", "o senna",
-    "a ferrari", "falar de ferrari",
-    "o drs", "sabe quando a asa",
-    "um pit stop", "as paradas nos boxes",
-    "o safety car", "pense no safety car",
-    "a classificação", "sábado é dia",
-    "os pneus são", "a pirelli",
-    "bandeira amarela", "bandeira vermelha", "avistou o amarelo",
-    "quando o perigo",
-    "a primeira corrida oficial",
-    "tudo começou em silverstone",
-    "entendido!", "tudo bem!", "sem problemas!",
-    "seu piloto favorito é",
-    "ainda não tive o prazer",
-    "estou melhor agora",
-    "tudo ótimo por aqui",
-    "pode me chamar de",
-    "que legal que você gosta",
-    "interessante!", "é um ponto de vista válido",
-    "gostei da sua perspectiva",
-    "você tem um ponto interessante",
-    "concordo!", "a adrenalina",
-    "você é dos meus",
-    "ah, então você já viu",
-    "que bom!", "é o momento perfeito",
-)
 
 
 class F1Chatbot:
 
     def __init__(self):
-        self.chat = Chat(get_f1_intents(), get_reflections())
         self.context = {}
         self.hooks = get_f1_hooks()
+        self.history = []
 
         self.interaction_count = 0
         self.current_phase = "WELCOME"
@@ -62,7 +29,8 @@ class F1Chatbot:
             "pneus", "aerodinâmica", "safety car",
         ]
 
-        self.data_context = build_data_context()
+        self.knowledge_base = build_knowledge_base()
+        self.data_context = self.knowledge_base.context
 
     def _get_next_hook(self):
         available_hooks = [
@@ -92,15 +60,14 @@ class F1Chatbot:
                 entities["topic"] = topic
         return entities
 
-    def _is_nltk_genuine(self, nltk_response: str) -> bool:
-        if not nltk_response:
-            return False
-        resp_lower = nltk_response.lower().strip()
-        return any(resp_lower.startswith(prefix) for prefix in _NLTK_GENUINE_PREFIXES)
+    def _remember(self, role: str, content: str) -> None:
+        self.history.append({"role": role, "content": content})
+        self.history = self.history[-8:]
 
     def get_response(self, user_input: str) -> str:
         self.interaction_count += 1
-        user_input = user_input.lower()
+        original_input = user_input.strip()
+        user_input = original_input.lower()
 
         entities = self.extract_entities(user_input)
         self.context.update(entities)
@@ -164,17 +131,18 @@ class F1Chatbot:
                 response = "Tem tantos assuntos na F1! Qual exatamente você quer aprofundar agora?"
 
         if not response:
-            nltk_response = self.chat.respond(user_input)
+            data_answer = self.knowledge_base.answer(user_input)
+            if data_answer:
+                response = data_answer
 
-            if self._is_nltk_genuine(nltk_response):
-                response = nltk_response
-            else:
-                print("[ENGINE] NLTK genérico detectado → acionando LLM com dados históricos de F1...")
-                llm_answer, _ = query_llm(
-                    user_message=user_input,
-                    data_context=self.data_context,
-                )
-                response = llm_answer
+        if not response:
+            print("[ENGINE] Base estruturada sem resposta completa → acionando LLM...")
+            llm_answer, _ = query_llm(
+                user_message=original_input,
+                data_context=self.data_context,
+                history=self.history,
+            )
+            response = llm_answer
 
         next_hook = self._get_next_hook()
         response = response.rstrip()
@@ -190,4 +158,7 @@ class F1Chatbot:
             " Aliás, ",
         ]
 
-        return f"{response}{random.choice(connectors)}{next_hook}"
+        final_response = f"{response}{random.choice(connectors)}{next_hook}"
+        self._remember("user", original_input)
+        self._remember("assistant", final_response)
+        return final_response
