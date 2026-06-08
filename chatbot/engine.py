@@ -58,7 +58,15 @@ class F1Chatbot:
 
     # ---------------- RESPOSTA ----------------
     def get_response(self, user_input: str) -> str:
+        """
+        Gera a resposta do chatbot a partir da mensagem do usuário.
+        Valida se a entrada é uma string não vazia antes de processar.
+        """
         self.interaction_count += 1
+
+        # ---------- Validação ----------
+        if not isinstance(user_input, str) or not user_input.strip():
+            return "Desculpe, não entendi sua mensagem. Poderia reformular?"
         user_input = user_input.lower()
 
         entities = self.extract_entities(user_input)
