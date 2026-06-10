@@ -20,21 +20,62 @@
         <button onclick="toggleTheme()" class="theme-toggle">🌙</button>
       </div>
 
-      <!-- Messages Area -->
-      <div id="messages">
-        <!-- Messages will appear here -->
-      </div>
-
-      <!-- Input Area -->
-      <div class="input-container">
-        <input id="input" type="text" placeholder="Converse comigo sobre a F1..." />
-        <button onclick="sendMessage()" class="send-btn">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"></line>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-          </svg>
+      <div class="tab-bar" role="tablist" aria-label="Navegação principal">
+        <button id="chat-tab" class="tab-btn active" type="button" role="tab" aria-selected="true" onclick="switchView('chat')">
+          Chat
+        </button>
+        <button id="dashboard-tab" class="tab-btn" type="button" role="tab" aria-selected="false" onclick="switchView('dashboard')">
+          Dashboard
         </button>
       </div>
+
+      <section id="chat-view" class="view active" role="tabpanel" aria-labelledby="chat-tab">
+        <div id="messages">
+          <!-- Messages will appear here -->
+        </div>
+
+        <div class="input-container">
+          <input id="input" type="text" placeholder="Converse comigo sobre a F1..." />
+          <button onclick="sendMessage()" class="send-btn" aria-label="Enviar mensagem">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+      </section>
+
+      <section id="dashboard-view" class="view dashboard-view" role="tabpanel" aria-labelledby="dashboard-tab" hidden>
+        <div class="dashboard-scroll">
+          <div class="prediction-hero">
+            <div>
+              <span class="section-kicker">Predição</span>
+              <h1 id="prediction-title">Carregando...</h1>
+              <p id="prediction-subtitle"></p>
+            </div>
+            <div id="confidence-pill" class="confidence-pill"></div>
+          </div>
+
+          <div id="prediction-bars" class="bar-chart"></div>
+
+          <div id="summary-grid" class="summary-grid"></div>
+
+          <div class="data-section">
+            <h2>Classificação</h2>
+            <div id="standings-list" class="data-list"></div>
+          </div>
+
+          <div class="data-section">
+            <h2>Vencedores recentes</h2>
+            <div id="winners-list" class="data-list"></div>
+          </div>
+
+          <div class="data-section">
+            <h2>Vitórias por equipe</h2>
+            <div id="team-wins-list" class="mini-bars"></div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <script src="/static/script.js"></script>
