@@ -3,6 +3,7 @@ import glob
 import re
 import traceback
 import unicodedata
+from difflib import SequenceMatcher
 import pandas as pd
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -58,6 +59,137 @@ def _format_number(value: float | int) -> str:
 def _plural(value: float | int, singular: str, plural: str) -> str:
     word = singular if abs(float(value)) == 1 else plural
     return f"{_format_number(value)} {word}"
+
+
+_RACE_GENERIC_TOKENS = {
+    "a",
+    "as",
+    "da",
+    "das",
+    "de",
+    "do",
+    "dos",
+    "e",
+    "em",
+    "etapa",
+    "gp",
+    "grand",
+    "o",
+    "os",
+    "prix",
+    "race",
+    "racing",
+}
+
+_QUERY_STOPWORDS = _RACE_GENERIC_TOKENS | {
+    "ano",
+    "chegou",
+    "colocacao",
+    "colocacoes",
+    "corrida",
+    "corridas",
+    "ficou",
+    "final",
+    "ganhador",
+    "ganhou",
+    "lugar",
+    "mais",
+    "podio",
+    "posicao",
+    "posicoes",
+    "primeiro",
+    "primeiros",
+    "qual",
+    "quais",
+    "quem",
+    "recente",
+    "resultado",
+    "top",
+    "ultima",
+    "ultimas",
+    "ultimo",
+    "ultimos",
+    "venceu",
+    "vencedor",
+    "vencedores",
+}
+
+_EVENT_ALIASES = {
+    "abu dhabi": ["abu", "dhabi"],
+    "alemanha": ["german"],
+    "arabia": ["saudi", "arabian"],
+    "arabia saudita": ["saudi", "arabian"],
+    "australia": ["australian"],
+    "austria": ["austrian"],
+    "azerbaijao": ["azerbaijan"],
+    "bahrein": ["bahrain"],
+    "barein": ["bahrain"],
+    "belgica": ["belgian"],
+    "brasil": ["brazilian", "sao", "paulo"],
+    "canada": ["canadian"],
+    "catar": ["qatar"],
+    "china": ["chinese"],
+    "eifel": ["eifel"],
+    "emilia romagna": ["emilia", "romagna", "imola"],
+    "espanha": ["spanish", "barcelona"],
+    "estados unidos": ["united", "states"],
+    "eua": ["united", "states"],
+    "europa": ["european"],
+    "franca": ["french"],
+    "gra bretanha": ["british", "silverstone"],
+    "holanda": ["dutch", "netherlands"],
+    "hungria": ["hungarian"],
+    "imola": ["emilia", "romagna", "imola"],
+    "inglaterra": ["british", "silverstone"],
+    "italia": ["italian", "monza"],
+    "japao": ["japanese", "suzuka"],
+    "jeddah": ["saudi", "arabian"],
+    "las vegas": ["las", "vegas"],
+    "malasia": ["malaysian"],
+    "mexico": ["mexican", "mexico", "city"],
+    "monza": ["italian", "monza"],
+    "monaco": ["monaco"],
+    "spa": ["belgian"],
+    "spa francorchamps": ["belgian"],
+    "interlagos": ["brazilian", "sao", "paulo"],
+    "silverstone": ["british", "silverstone"],
+    "suzuka": ["japanese", "suzuka"],
+    "zandvoort": ["dutch", "netherlands"],
+    "barcelona": ["spanish", "barcelona"],
+    "catalunya": ["spanish", "barcelona"],
+    "circuito da catalunha": ["spanish", "barcelona"],
+    "spielberg": ["austrian"],
+    "red bull ring": ["austrian"],
+    "baku": ["azerbaijan"],
+    "yas marina": ["abu", "dhabi"],
+    "miami": ["miami"],
+    "cota": ["united", "states"],
+    "hungaroring": ["hungarian"],
+    "paulo": ["sao", "paulo"],
+    "portugal": ["portuguese"],
+    "qatar": ["qatar"],
+    "russia": ["russian"],
+    "sao paulo": ["sao", "paulo", "brazilian"],
+    "singapura": ["singapore"],
+    "turquia": ["turkish"],
+}
+
+
+def _significant_tokens(text: str, stopwords: set[str] | None = None) -> set[str]:
+    stopwords = stopwords or _RACE_GENERIC_TOKENS
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_text(text))
+        if len(token) >= 3 and token not in stopwords and not token.isdigit()
+    }
+
+
+def _expanded_query_tokens(normalized_text: str) -> set[str]:
+    tokens = _significant_tokens(normalized_text, _QUERY_STOPWORDS)
+    for alias, replacements in _EVENT_ALIASES.items():
+        if alias in normalized_text:
+            tokens.update(replacements)
+    return tokens
  
  
 def _read_parquet(filepath: str) -> pd.DataFrame | None:
@@ -212,14 +344,27 @@ class F1DataKnowledgeBase:
 
         text = user_input.lower()
 
-        if self._is_latest_race_winner_question(text):
-            return self.latest_race_winner()
+        comparison_answer = self.driver_comparison(user_input)
+        if comparison_answer:
+            return comparison_answer
+
+        race_answer = self.race_result(user_input)
+        if race_answer:
+            return race_answer
+
+        driver_fact_answer = self.driver_fact(user_input)
+        if driver_fact_answer:
+            return driver_fact_answer
+
+        championship_answer = self.championship_result(user_input)
+        if championship_answer:
+            return championship_answer
 
         if self._is_prediction_question(text):
             return self.predict_driver_champion()
 
         if self._is_standings_question(text):
-            year = self._extract_year(text) or int(self.sessions["Year"].max())
+            year = self._championship_query_year(text) or int(self.sessions["Year"].max())
             return self.driver_standings(year)
 
         if self._is_recent_winners_question(text):
@@ -479,6 +624,53 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
             f"mais recente:\n" + "\n".join(rows)
         )
 
+    def championship_result(self, query: str, limit: int = 10) -> str | None:
+        if not self._is_championship_result_question(query):
+            return None
+
+        year = self._championship_query_year(query)
+        if year is None:
+            return None
+
+        season = self.sessions[self.sessions["Year"].eq(year)].copy()
+        if season.empty:
+            return f"Não encontrei dados do campeonato de {year}."
+
+        if self._is_constructor_standings_question(query):
+            standings = (
+                season.groupby("TeamName", as_index=False)["Points"]
+                .sum()
+                .sort_values("Points", ascending=False)
+                .head(limit)
+            )
+            champion = standings.iloc[0]
+            rows = [
+                f"{i + 1}. {row.TeamName} — {row.Points:.0f} pts"
+                for i, row in enumerate(standings.itertuples())
+            ]
+            return (
+                f"Resultado do campeonato de construtores de {year}: "
+                f"a campeã foi a {champion.TeamName}, com {champion.Points:.0f} pontos.\n"
+                + "\n".join(rows)
+            )
+
+        standings = (
+            season.groupby(["FullName", "TeamName"], as_index=False)["Points"]
+            .sum()
+            .sort_values("Points", ascending=False)
+            .head(limit)
+        )
+        champion = standings.iloc[0]
+        rows = [
+            f"{i + 1}. {row.FullName} ({row.TeamName}) — {row.Points:.0f} pts"
+            for i, row in enumerate(standings.itertuples())
+        ]
+        return (
+            f"Resultado do campeonato de pilotos de {year}: "
+            f"o campeão foi {champion.FullName}, com {champion.Points:.0f} pontos.\n"
+            + "\n".join(rows)
+        )
+
     def recent_winners(self, limit: int = 5) -> str | None:
         races = self.sessions[self.sessions["Mode"].fillna("Race").eq("Race")].copy()
         winners = races[races["Position"] == 1.0].sort_values("Date").tail(limit)
@@ -492,16 +684,282 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         return "Últimos vencedores:\n" + "\n".join(rows)
 
     def latest_race_winner(self) -> str | None:
-        races = self.sessions[self.sessions["Mode"].fillna("Race").eq("Race")].copy()
-        winners = races[races["Position"] == 1.0].sort_values("Date")
-        if winners.empty:
+        return self.race_result("quem venceu a última corrida")
+
+    def race_result(self, query: str) -> str | None:
+        driver_name = self._match_driver_name(query)
+        result_type = self._race_result_type(query)
+        if result_type is None and driver_name and self._has_race_reference(query):
+            result_type = "driver"
+        if result_type == "classification" and driver_name and self._asks_driver_race_result(query):
+            result_type = "driver"
+        if not result_type:
             return None
 
-        winner = winners.iloc[-1]
-        return (
-            f"A corrida mais recente foi o {winner.EventName} de {int(winner.Year)}. "
-            f"Quem venceu foi {winner.FullName}, pela equipe {winner.TeamName}."
+        race = self._resolve_race(query)
+        if race is None:
+            return None
+
+        race_rows = (
+            self.sessions[
+                self.sessions["Mode"].fillna("Race").eq("Race")
+                & self.sessions["Year"].eq(int(race.Year))
+                & self.sessions["RoundNumber"].eq(int(race.RoundNumber))
+            ]
+            .copy()
+            .dropna(subset=["Position"])
+            .sort_values("Position")
         )
+        if race_rows.empty:
+            return None
+
+        event_name = str(race.EventName)
+        year = int(race.Year)
+
+        if result_type == "driver":
+            driver_row = race_rows[race_rows["FullName"].eq(driver_name)]
+            if driver_row.empty:
+                return f"Não encontrei {driver_name} no resultado do {event_name} de {year}."
+            return self._format_driver_race_result(driver_row.iloc[0], event_name, year)
+
+        if result_type == "position":
+            position = self._extract_requested_position(query)
+            if position is None:
+                return None
+            position_row = race_rows[race_rows["Position"].eq(float(position))]
+            if position_row.empty:
+                return f"Não encontrei {position}º colocado no {event_name} de {year}."
+            row = position_row.iloc[0]
+            return (
+                f"No {event_name} de {year}, o {position}º colocado foi "
+                f"{row.FullName}, pela {row.TeamName}. "
+                f"Largou em {self._format_position(row.GridPosition)}, completou "
+                f"{_format_number(row.Laps)} voltas, marcou {_format_number(row.Points)} ponto(s) "
+                f"e teve status: {row.Status or 'não informado'}."
+            )
+
+        if result_type == "winner":
+            winner = race_rows[race_rows["Position"].eq(1.0)]
+            if winner.empty:
+                return None
+            winner = winner.iloc[0]
+            if self._is_latest_race_reference(query):
+                return (
+                    f"A corrida mais recente foi o {event_name} de {year}. "
+                    f"Quem venceu foi {winner.FullName}, pela equipe {winner.TeamName}."
+                )
+            return (
+                f"No {event_name} de {year}, quem venceu foi {winner.FullName}, "
+                f"pela equipe {winner.TeamName}."
+            )
+
+        if result_type == "classification":
+            limit = self._classification_limit(query)
+            rows = self._format_classification_rows(race_rows.head(limit))
+            label = "classificação completa" if limit >= len(race_rows) else f"top {limit}"
+            return f"{label.capitalize()} do {event_name} de {year}:\n" + "\n".join(rows)
+
+        podium = race_rows[race_rows["Position"].isin([1.0, 2.0, 3.0])].head(3)
+        if podium.empty:
+            return None
+
+        rows = self._format_classification_rows(podium)
+        if self._is_latest_race_reference(query):
+            return (
+                f"O pódio da corrida mais recente, o {event_name} de {year}, foi:\n"
+                + "\n".join(rows)
+            )
+        return f"O pódio do {event_name} de {year} foi:\n" + "\n".join(rows)
+
+    @staticmethod
+    def _format_position(value: object) -> str:
+        if pd.isna(value):
+            return "posição não informada"
+        return f"{int(float(value))}º"
+
+    def _format_driver_race_result(self, row: pd.Series, event_name: str, year: int) -> str:
+        return (
+            f"No {event_name} de {year}, {row.FullName} terminou em "
+            f"{self._format_position(row.Position)} pela {row.TeamName}. "
+            f"Largou em {self._format_position(row.GridPosition)}, completou "
+            f"{_format_number(row.Laps)} voltas, marcou {_format_number(row.Points)} ponto(s) "
+            f"e teve status: {row.Status or 'não informado'}."
+        )
+
+    @staticmethod
+    def _format_classification_rows(rows: pd.DataFrame) -> list[str]:
+        return [
+            f"{int(row.Position)}. {row.FullName} ({row.TeamName}) — "
+            f"{_format_number(row.Points)} pts, status: {row.Status or 'não informado'}"
+            for row in rows.itertuples()
+        ]
+
+    @staticmethod
+    def _classification_limit(query: str) -> int:
+        normalized = _normalize_text(query)
+        top_match = re.search(r"\btop\s*(\d{1,2})\b", normalized)
+        if top_match:
+            return max(1, min(int(top_match.group(1)), 30))
+        if any(term in normalized for term in ["completo", "completa", "todos", "inteira", "inteiro"]):
+            return 30
+        return 10
+
+    def driver_fact(self, query: str) -> str | None:
+        if self._is_comparison_question(query):
+            return None
+
+        normalized = _normalize_text(query)
+        driver_name = self._match_driver_name(query)
+        if not driver_name:
+            return None
+
+        if self._has_race_reference(query):
+            return None
+
+        driver_rows = self.sessions[self.sessions["FullName"].eq(driver_name)].copy()
+        if driver_rows.empty:
+            return None
+
+        race_rows = driver_rows[driver_rows["Mode"].fillna("Race").eq("Race")].copy()
+        year = self._extract_year(normalized)
+        scoped_races = race_rows[race_rows["Year"].eq(year)].copy() if year else race_rows
+        if scoped_races.empty:
+            return f"Não encontrei resultados de corrida para {driver_name}" + (f" em {year}." if year else ".")
+
+        if any(term in normalized for term in ["vitoria", "venceu", "ganhou"]):
+            wins = scoped_races[scoped_races["Position"].eq(1.0)].sort_values(["Date", "Year", "RoundNumber"])
+            if any(term in normalized for term in ["quantas", "quantos", "total", "numero"]):
+                scope = f" em {year}" if year else ""
+                return f"{driver_name} tem {len(wins)} vitória(s){scope} na base local."
+            if wins.empty:
+                scope = f" em {year}" if year else ""
+                return f"Não encontrei vitórias de {driver_name}{scope} na base local."
+
+            row = wins.iloc[0] if "primeira" in normalized or "primeiro" in normalized else wins.iloc[-1]
+            prefix = "A primeira vitória" if ("primeira" in normalized or "primeiro" in normalized) else "A última vitória"
+            return (
+                f"{prefix} de {driver_name} foi no {row.EventName} de {int(row.Year)}, "
+                f"correndo pela {row.TeamName}."
+            )
+
+        if "podio" in normalized:
+            podiums = scoped_races[scoped_races["Position"].le(3.0)].sort_values(["Date", "Year", "RoundNumber"])
+            if any(term in normalized for term in ["quantas", "quantos", "total", "numero"]):
+                scope = f" em {year}" if year else ""
+                return f"{driver_name} tem {len(podiums)} pódio(s){scope} na base local."
+            if podiums.empty:
+                scope = f" em {year}" if year else ""
+                return f"Não encontrei pódios de {driver_name}{scope} na base local."
+
+            row = podiums.iloc[0] if "primeiro" in normalized or "primeira" in normalized else podiums.iloc[-1]
+            prefix = "O primeiro pódio" if ("primeiro" in normalized or "primeira" in normalized) else "O último pódio"
+            return (
+                f"{prefix} de {driver_name} foi no {row.EventName} de {int(row.Year)}, "
+                f"em {self._format_position(row.Position)}, pela {row.TeamName}."
+            )
+
+        if "pontos" in normalized or "pontuacao" in normalized or "pontuação" in normalized:
+            points_rows = driver_rows[driver_rows["Year"].eq(year)].copy() if year else driver_rows
+            points = float(points_rows["Points"].sum())
+            scope = f" em {year}" if year else " na base local"
+            return f"{driver_name} soma {_format_number(points)} ponto(s){scope}."
+
+        if any(term in normalized for term in ["corridas", "gps", "largadas"]):
+            entries = scoped_races[["Year", "RoundNumber"]].drop_duplicates().shape[0]
+            scope = f" em {year}" if year else " na base local"
+            return f"{driver_name} tem {entries} corrida(s){scope}."
+
+        if any(term in normalized for term in ["melhor resultado", "melhor posicao", "melhor colocacao"]):
+            best_position = scoped_races["Position"].min()
+            best_rows = scoped_races[scoped_races["Position"].eq(best_position)].sort_values(["Date", "Year", "RoundNumber"])
+            row = best_rows.iloc[0]
+            return (
+                f"O melhor resultado de {driver_name} foi {self._format_position(best_position)}. "
+                f"Na base, a primeira ocorrência foi no {row.EventName} de {int(row.Year)}, "
+                f"pela {row.TeamName}."
+            )
+
+        if self._is_latest_race_reference(normalized):
+            row = scoped_races.sort_values(["Date", "Year", "RoundNumber"]).iloc[-1]
+            return self._format_driver_race_result(row, str(row.EventName), int(row.Year))
+
+        return None
+
+    def driver_comparison(self, query: str) -> str | None:
+        if not self._is_comparison_question(query):
+            return None
+
+        normalized = _normalize_text(query)
+        drivers = self._match_driver_names(query)
+        if len(drivers) < 2:
+            return None
+
+        stats = [self._driver_career_stats(driver) for driver in drivers[:3]]
+        stats = [stat for stat in stats if stat]
+        if len(stats) < 2:
+            return None
+
+        criterion_label = "indicadores objetivos"
+        if "vitoria" in normalized:
+            leader = max(stats, key=lambda item: item["wins"])
+            criterion_label = "vitórias"
+        elif "pontos" in normalized or "pontuacao" in normalized:
+            leader = max(stats, key=lambda item: item["points"])
+            criterion_label = "pontos"
+        elif "podio" in normalized:
+            leader = max(stats, key=lambda item: item["podiums"])
+            criterion_label = "pódios"
+        elif any(term in normalized for term in ["titulo", "titulos", "campeonato", "mundial"]):
+            leader = max(stats, key=lambda item: item["championships"])
+            criterion_label = "títulos"
+        else:
+            leader = max(
+                stats,
+                key=lambda item: (
+                    item["championships"],
+                    item["wins"],
+                    item["podiums"],
+                    item["points"],
+                    item["races"],
+                ),
+            )
+        rows = [
+            (
+                f"{item['driver']}: {item['championships']} título(s), "
+                f"{item['wins']} vitória(s), {item['podiums']} pódio(s), "
+                f"{_format_number(item['points'])} ponto(s), {item['races']} corrida(s)."
+            )
+            for item in stats
+        ]
+        if criterion_label == "indicadores objetivos":
+            intro = (
+                "Não existe um critério único para 'melhor'. Pelos indicadores objetivos da base local, "
+                f"{leader['driver']} leva vantagem nesse recorte."
+            )
+        else:
+            intro = f"Pelo critério de {criterion_label}, {leader['driver']} leva vantagem na base local."
+
+        return intro + "\n" + "\n".join(rows)
+
+    def _driver_career_stats(self, driver_name: str) -> dict | None:
+        driver_rows = self.sessions[self.sessions["FullName"].eq(driver_name)].copy()
+        if driver_rows.empty:
+            return None
+
+        races = driver_rows[driver_rows["Mode"].fillna("Race").eq("Race")].copy()
+        championships = 0
+        for year in sorted(self.sessions["Year"].dropna().unique()):
+            if self._season_champion(int(year)) == driver_name:
+                championships += 1
+
+        return {
+            "driver": driver_name,
+            "championships": championships,
+            "points": float(driver_rows["Points"].sum()),
+            "races": int(races[["Year", "RoundNumber"]].drop_duplicates().shape[0]),
+            "wins": int(races["Position"].eq(1.0).sum()),
+            "podiums": int(races["Position"].le(3.0).sum()),
+        }
 
     def driver_profile(self, query: str) -> str | None:
         driver_name = self._match_driver_name(query)
@@ -908,6 +1366,8 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
                 score = max(score, 8)
             if last_name and last_name in query_tokens:
                 score = max(score, 6)
+            if last_name and any(SequenceMatcher(None, last_name, token).ratio() >= 0.88 for token in query_tokens):
+                score = max(score, 5)
             if any(part in query_tokens for part in name_parts):
                 score = max(score, 4)
 
@@ -928,6 +1388,322 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
 
         candidates.sort(reverse=True)
         return candidates[0][3]
+
+    def _match_driver_names(self, query: str) -> list[str]:
+        normalized_query = _normalize_text(query)
+        query_tokens = set(re.findall(r"[a-z0-9]+", normalized_query))
+        if not query_tokens:
+            return []
+
+        matches = []
+        canonical_surnames = {
+            "verstappen": "Max Verstappen",
+            "senna": "Ayrton Senna",
+            "schumacher": "Michael Schumacher",
+            "hamilton": "Lewis Hamilton",
+            "leclerc": "Charles Leclerc",
+            "alonso": "Fernando Alonso",
+            "norris": "Lando Norris",
+            "piastri": "Oscar Piastri",
+            "russell": "George Russell",
+            "perez": "Sergio Perez",
+        }
+        driver_rows = (
+            self.sessions[["FullName", "DriverId", "Abbreviation", "Year"]]
+            .drop_duplicates()
+            .dropna(subset=["FullName"])
+        )
+
+        for full_name, group in driver_rows.groupby("FullName"):
+            full_name = str(full_name)
+            full_name_norm = _normalize_text(full_name)
+            name_parts = [part for part in full_name_norm.split() if len(part) >= 4]
+            last_name = name_parts[-1] if name_parts else ""
+            canonical_name = canonical_surnames.get(last_name)
+            if (
+                canonical_name
+                and last_name in query_tokens
+                and full_name != canonical_name
+                and full_name_norm not in normalized_query
+            ):
+                continue
+
+            score = 0
+            position = 10_000
+            if full_name_norm and full_name_norm in normalized_query:
+                score = max(score, 10)
+                position = min(position, normalized_query.find(full_name_norm))
+
+            if last_name and last_name in query_tokens:
+                score = max(score, 8)
+                position = min(position, normalized_query.find(last_name))
+
+            if any(part in query_tokens for part in name_parts):
+                score = max(score, 5)
+                for part in name_parts:
+                    if part in normalized_query:
+                        position = min(position, normalized_query.find(part))
+
+            if last_name:
+                for token in query_tokens:
+                    if SequenceMatcher(None, last_name, token).ratio() >= 0.88:
+                        score = max(score, 6)
+                        position = min(position, normalized_query.find(token))
+
+            for row in group.itertuples():
+                driver_id = _normalize_text(row.DriverId)
+                abbreviation = _normalize_text(row.Abbreviation)
+                if driver_id and (driver_id in normalized_query or driver_id in query_tokens):
+                    score = max(score, 7)
+                    position = min(position, normalized_query.find(driver_id))
+                if abbreviation and len(abbreviation) >= 3 and abbreviation in query_tokens:
+                    score = max(score, 6)
+                    position = min(position, normalized_query.find(abbreviation))
+
+            if score:
+                matches.append((position, -score, -int(group["Year"].max()), full_name))
+
+        matches.sort()
+        ordered = []
+        for _, _, _, full_name in matches:
+            if full_name not in ordered:
+                ordered.append(full_name)
+        return ordered
+
+    def _race_index(self) -> pd.DataFrame:
+        races = self.sessions[self.sessions["Mode"].fillna("Race").eq("Race")].copy()
+        if races.empty:
+            return pd.DataFrame()
+
+        columns = ["Year", "RoundNumber", "EventName", "Date"]
+        return (
+            races[columns]
+            .sort_values(["Date", "Year", "RoundNumber"], na_position="last")
+            .drop_duplicates(["Year", "RoundNumber"], keep="first")
+            .reset_index(drop=True)
+        )
+
+    def _latest_race(self, races: pd.DataFrame) -> pd.Series | None:
+        if races.empty:
+            return None
+
+        dated = races.dropna(subset=["Date"]).sort_values(["Date", "Year", "RoundNumber"])
+        if not dated.empty:
+            return dated.iloc[-1]
+
+        return races.sort_values(["Year", "RoundNumber"]).iloc[-1]
+
+    def _resolve_race(self, query: str) -> pd.Series | None:
+        races = self._race_index()
+        if races.empty:
+            return None
+
+        normalized = _normalize_text(query)
+        year = self._extract_year(normalized)
+
+        if self._is_latest_race_reference(normalized):
+            scoped = races[races["Year"].eq(year)] if year else races
+            return self._latest_race(scoped)
+
+        round_match = re.search(r"\b(?:etapa|rodada|round)\s*(\d{1,2})\b", normalized)
+        if round_match:
+            round_number = int(round_match.group(1))
+            scoped = races[races["RoundNumber"].eq(round_number)]
+            if year:
+                scoped = scoped[scoped["Year"].eq(year)]
+            race = self._latest_race(scoped)
+            if race is not None:
+                return race
+
+        query_tokens = _expanded_query_tokens(normalized)
+        if not query_tokens:
+            return None
+
+        scoped = races[races["Year"].eq(year)].copy() if year else races.copy()
+        if scoped.empty:
+            return None
+
+        scored = []
+        for idx, row in scoped.iterrows():
+            event_norm = _normalize_text(row.EventName)
+            event_tokens = _significant_tokens(event_norm)
+            if not event_tokens:
+                continue
+
+            score = 0.0
+            if event_norm and event_norm in normalized:
+                score += 100.0
+
+            intersection = event_tokens & query_tokens
+            score += len(intersection) * 25.0
+
+            for event_token in event_tokens:
+                for query_token in query_tokens:
+                    ratio = SequenceMatcher(None, event_token, query_token).ratio()
+                    shares_prefix = (
+                        len(event_token) >= 5
+                        and len(query_token) >= 5
+                        and (event_token.startswith(query_token) or query_token.startswith(event_token))
+                    )
+                    if ratio >= 0.82 or shares_prefix:
+                        score += 12.0
+                        break
+
+            if score >= 12.0:
+                date_value = row.Date if pd.notna(row.Date) else pd.Timestamp.min
+                scored.append((score, date_value, idx))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return scoped.loc[scored[0][2]]
+
+    @staticmethod
+    def _is_latest_race_reference(text: str) -> bool:
+        normalized = _normalize_text(text)
+        latest_terms = [
+            "ultima corrida",
+            "ultimo gp",
+            "corrida mais recente",
+            "gp mais recente",
+            "corrida recente",
+        ]
+        return any(term in normalized for term in latest_terms)
+
+    @staticmethod
+    def _has_race_reference(text: str) -> bool:
+        normalized = _normalize_text(text)
+        if F1DataKnowledgeBase._is_latest_race_reference(normalized):
+            return True
+        if re.search(r"\b(?:gp|grand prix|corrida|etapa|rodada|round)\b", normalized):
+            return True
+        return any(alias in normalized for alias in _EVENT_ALIASES)
+
+    @staticmethod
+    def _asks_driver_race_result(text: str) -> bool:
+        normalized = _normalize_text(text)
+        return any(
+            term in normalized
+            for term in [
+                "resultado",
+                "posicao",
+                "colocacao",
+                "ficou",
+                "terminou",
+                "chegou",
+                "pontos",
+                "pontuacao",
+                "grid",
+                "largou",
+                "status",
+                "abandono",
+                "voltas",
+            ]
+        )
+
+    @staticmethod
+    def _extract_requested_position(text: str) -> int | None:
+        normalized = _normalize_text(text)
+        ordinal_words = {
+            "primeiro": 1,
+            "primeira": 1,
+            "segundo": 2,
+            "segunda": 2,
+            "terceiro": 3,
+            "terceira": 3,
+            "quarto": 4,
+            "quarta": 4,
+            "quinto": 5,
+            "quinta": 5,
+            "sexto": 6,
+            "sexta": 6,
+            "setimo": 7,
+            "setima": 7,
+            "oitavo": 8,
+            "oitava": 8,
+            "nono": 9,
+            "nona": 9,
+            "decimo": 10,
+            "decima": 10,
+        }
+        for word, value in ordinal_words.items():
+            if re.search(rf"\b{word}\b", normalized):
+                return value
+
+        patterns = [
+            r"\bp\s*(\d{1,2})\b",
+            r"\b(?:posicao|posição|colocacao|colocação|lugar)\s*(\d{1,2})\b",
+            r"\b(\d{1,2})(?:o|a|º|ª)?\s*(?:colocado|colocada|lugar|posicao|posição)\b",
+            r"\b(?:terminou|chegou|ficou)\s+em\s+(\d{1,2})(?:o|a|º|ª)?\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                value = int(match.group(1))
+                if 1 <= value <= 30:
+                    return value
+        return None
+
+    @staticmethod
+    def _is_comparison_question(text: str) -> bool:
+        normalized = _normalize_text(text)
+        return any(
+            term in f" {normalized} "
+            for term in [
+                " melhor ",
+                " versus ",
+                " vs ",
+                " ou ",
+                " compar",
+                " maior ",
+                " pior ",
+                " mais vitoria",
+                " mais pontos",
+                " mais titulos",
+                " mais podios",
+            ]
+        )
+
+    @staticmethod
+    def _race_result_type(query: str) -> str | None:
+        normalized = _normalize_text(query)
+        if F1DataKnowledgeBase._extract_requested_position(normalized) is not None:
+            return "position"
+
+        podium_terms = [
+            "podio",
+            "top 3",
+            "top tres",
+            "primeiros 3",
+            "primeiros tres",
+            "tres primeiros",
+        ]
+        if any(term in normalized for term in podium_terms):
+            return "podium"
+
+        winner_terms = ["quem ganhou", "quem venceu", "vencedor", "ganhador"]
+        if any(term in normalized for term in winner_terms):
+            return "winner"
+
+        result_terms = [
+            "resultado",
+            "classificacao",
+            "classificaçao",
+            "classificação",
+            "colocacao",
+            "colocação",
+            "posicao",
+            "posição",
+            "ordem",
+            "ordem de chegada",
+            "chegada",
+            "top ",
+        ]
+        if any(term in normalized for term in result_terms):
+            return "classification"
+
+        return None
 
     @staticmethod
     def _is_latest_race_winner_question(text: str) -> bool:
@@ -975,6 +1751,110 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
     def _extract_year(text: str) -> int | None:
         match = re.search(r"\b(19\d{2}|20\d{2})\b", text)
         return int(match.group(1)) if match else None
+
+    def _championship_query_year(self, text: str) -> int | None:
+        normalized = _normalize_text(text)
+        explicit_year = self._extract_year(normalized)
+        if explicit_year is not None:
+            return explicit_year
+
+        latest_year = int(self.sessions["Year"].max())
+        latest_completed_year = self._latest_completed_championship_year()
+        latest_champion_terms = [
+            "ultimo campeao",
+            "ultima campea",
+            "campeao atual",
+            "campea atual",
+            "atual campeao",
+            "atual campea",
+            "ultimo vencedor do campeonato",
+            "ultimo campeao mundial",
+        ]
+        if any(term in normalized for term in latest_champion_terms):
+            return latest_completed_year
+
+        previous_terms = ["passado", "passada", "anterior"]
+        season_terms = ["campeonato", "campeonanto", "temporada", "ano", "mundial"]
+        if any(term in normalized for term in previous_terms) and any(
+            term in normalized for term in season_terms
+        ):
+            return latest_completed_year
+
+        current_terms = [
+            "campeonato atual",
+            "temporada atual",
+            "este campeonato",
+            "essa temporada",
+            "temporada mais recente",
+        ]
+        if any(term in normalized for term in current_terms):
+            return latest_year
+
+        return None
+
+    def _is_championship_result_question(self, text: str) -> bool:
+        normalized = _normalize_text(text)
+        if self._extract_year(normalized) is not None and any(
+            term in normalized for term in ["campeao", "campea", "titulo", "título"]
+        ):
+            return True
+
+        latest_champion_terms = [
+            "ultimo campeao",
+            "ultima campea",
+            "campeao atual",
+            "campea atual",
+            "atual campeao",
+            "atual campea",
+        ]
+        if any(term in normalized for term in latest_champion_terms):
+            return True
+
+        championship_terms = ["campeonato", "campeonanto", "temporada", "mundial"]
+        result_terms = [
+            "resultado",
+            "classificacao",
+            "pontuacao",
+            "tabela",
+            "standings",
+            "quem ganhou",
+            "quem venceu",
+            "campeao",
+            "vencedor",
+        ]
+        return (
+            any(term in normalized for term in championship_terms)
+            and any(term in normalized for term in result_terms)
+            and self._championship_query_year(normalized) is not None
+        )
+
+    def _latest_completed_championship_year(self) -> int:
+        races = self.sessions[self.sessions["Mode"].fillna("Race").eq("Race")]
+        race_counts = races.groupby("Year")["RoundNumber"].nunique().sort_index()
+        if race_counts.empty:
+            return int(self.sessions["Year"].max())
+
+        latest_year = int(race_counts.index[-1])
+        if len(race_counts) == 1:
+            return latest_year
+
+        previous_year = int(race_counts.index[-2])
+        latest_count = int(race_counts.iloc[-1])
+        previous_count = int(race_counts.iloc[-2])
+        minimum_complete_count = max(10, int(previous_count * 0.75))
+
+        if latest_count < minimum_complete_count:
+            return previous_year
+
+        return latest_year
+
+    @staticmethod
+    def _is_constructor_standings_question(text: str) -> bool:
+        normalized = _normalize_text(text)
+        return any(
+            term in normalized
+            for term in ["construtores", "equipes", "times", "escuderias"]
+        )
 
     @staticmethod
     def _is_prediction_question(text: str) -> bool:
