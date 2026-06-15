@@ -2,6 +2,7 @@ import os
 import glob
 import re
 import traceback
+import unicodedata
 import pandas as pd
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -13,6 +14,9 @@ _NEEDED_COLS = [
     "TeamName",
     "Position",
     "GridPosition",
+    "ClassifiedPosition",
+    "Status",
+    "Laps",
     "Points",
     "Year",
     "Date",
@@ -20,6 +24,40 @@ _NEEDED_COLS = [
     "Mode",
     "RoundNumber",
 ]
+
+
+def _classified_status(status: object) -> bool:
+    text = str(status or "").strip().lower()
+    return (
+        text == "finished"
+        or text == "lapped"
+        or bool(re.fullmatch(r"\+\d+\s+laps?", text))
+    )
+
+
+def _did_not_start_status(status: object) -> bool:
+    text = str(status or "").strip().lower()
+    return text in {"did not start", "did not qualify", "withdrew", "withdrawn"}
+
+
+def _normalize_text(text: object) -> str:
+    if pd.isna(text):
+        return ""
+    normalized = unicodedata.normalize("NFKD", str(text or "").lower())
+    normalized = "".join(c for c in normalized if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _format_number(value: float | int) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.1f}".replace(".", ",")
+
+
+def _plural(value: float | int, singular: str, plural: str) -> str:
+    word = singular if abs(float(value)) == 1 else plural
+    return f"{_format_number(value)} {word}"
  
  
 def _read_parquet(filepath: str) -> pd.DataFrame | None:
@@ -103,9 +141,26 @@ def _to_silver_sessions(df: pd.DataFrame) -> pd.DataFrame:
     silver["DriverId"] = silver.get("DriverId", silver["FullName"]).fillna(silver["FullName"])
     silver["DriverId"] = silver["DriverId"].astype(str).str.strip()
 
-    for col in ["Position", "GridPosition", "Points", "Year", "RoundNumber"]:
+    for col in ["Position", "GridPosition", "Points", "Year", "RoundNumber", "Laps"]:
         if col in silver.columns:
             silver[col] = pd.to_numeric(silver[col], errors="coerce")
+
+    if "Status" not in silver.columns:
+        silver["Status"] = ""
+    if "ClassifiedPosition" not in silver.columns:
+        silver["ClassifiedPosition"] = ""
+
+    silver["Status"] = silver["Status"].fillna("").astype(str).str.strip()
+    silver["ClassifiedPosition"] = silver["ClassifiedPosition"].fillna("").astype(str).str.strip()
+    classified_position = pd.to_numeric(silver["ClassifiedPosition"], errors="coerce").notna()
+    classified_status = silver["Status"].map(_classified_status)
+    missing_status_with_position = silver["Status"].eq("") & silver["Position"].notna()
+    silver["IsClassified"] = classified_status | classified_position | missing_status_with_position
+    silver["DidNotStart"] = (
+        silver["Status"].map(_did_not_start_status)
+        | silver["ClassifiedPosition"].str.upper().eq("W")
+    )
+    silver["DidNotFinish"] = ~silver["IsClassified"] & ~silver["DidNotStart"]
 
     silver["Date"] = pd.to_datetime(silver["Date"], errors="coerce")
     silver = silver.dropna(subset=["FullName", "Year", "RoundNumber"])
@@ -157,6 +212,9 @@ class F1DataKnowledgeBase:
 
         text = user_input.lower()
 
+        if self._is_latest_race_winner_question(text):
+            return self.latest_race_winner()
+
         if self._is_prediction_question(text):
             return self.predict_driver_champion()
 
@@ -166,6 +224,10 @@ class F1DataKnowledgeBase:
 
         if self._is_recent_winners_question(text):
             return self.recent_winners()
+
+        driver_profile = self.driver_profile(user_input)
+        if driver_profile:
+            return driver_profile
 
         return None
 
@@ -179,6 +241,7 @@ class F1DataKnowledgeBase:
             winners = races[races["Position"] == 1.0].copy()
             all_years = sorted(df["Year"].dropna().unique())
             last_two = all_years[-2:]
+            latest_year = int(all_years[-1])
 
             top_drivers = winners["FullName"].value_counts().head(15)
             driver_wins_str = "\n".join(
@@ -191,6 +254,17 @@ class F1DataKnowledgeBase:
             )
 
             champ_str = _points_leaders_per_year(df)
+
+            current_drivers = (
+                df[df["Year"].eq(latest_year)]
+                .groupby(["FullName", "TeamName"], as_index=False)["Points"]
+                .sum()
+                .sort_values("Points", ascending=False)
+            )
+            current_driver_str = "\n".join(
+                f"  {r.FullName} ({r.TeamName}) — {r.Points:.0f} pts"
+                for r in current_drivers.itertuples()
+            )
 
             recent_races = winners.sort_values("Date").tail(10)[
                 ["Year", "EventName", "FullName", "TeamName"]
@@ -225,6 +299,9 @@ VITÓRIAS POR EQUIPE (todos os tempos):
 
 LÍDERES DE PONTOS POR TEMPORADA:
 {champ_str}
+
+PILOTOS DA TEMPORADA MAIS RECENTE ({latest_year}):
+{current_driver_str}
 
 ÚLTIMAS 10 CORRIDAS:
 {recent_str}
@@ -313,9 +390,13 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         )
 
         races = self.sessions[self.sessions["Mode"].eq("Race")].copy()
+        season_races = season[season["Mode"].eq("Race")].copy()
         winners = races[races["Position"] == 1.0].sort_values("Date").tail(5)
+        season_winners = season_races[season_races["Position"] == 1.0].drop_duplicates(
+            ["Year", "RoundNumber"]
+        )
         team_wins = (
-            races[races["Position"] == 1.0]["TeamName"]
+            season_winners["TeamName"]
             .value_counts()
             .head(6)
             .reset_index()
@@ -409,6 +490,108 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         ]
         return "Últimos vencedores:\n" + "\n".join(rows)
 
+    def latest_race_winner(self) -> str | None:
+        races = self.sessions[self.sessions["Mode"].fillna("Race").eq("Race")].copy()
+        winners = races[races["Position"] == 1.0].sort_values("Date")
+        if winners.empty:
+            return None
+
+        winner = winners.iloc[-1]
+        return (
+            f"A corrida mais recente foi o {winner.EventName} de {int(winner.Year)}. "
+            f"Quem venceu foi {winner.FullName}, pela equipe {winner.TeamName}."
+        )
+
+    def driver_profile(self, query: str) -> str | None:
+        driver_name = self._match_driver_name(query)
+        if not driver_name:
+            return None
+
+        driver = self.sessions[self.sessions["FullName"].eq(driver_name)].copy()
+        if driver.empty:
+            return None
+
+        driver = driver.sort_values(["Year", "RoundNumber", "Mode"])
+        races = driver[driver["Mode"].eq("Race")].copy()
+        classified_races = races[~races["DidNotStart"]].copy()
+        latest_row = driver.sort_values("Date").dropna(subset=["Date"]).tail(1)
+        if latest_row.empty:
+            latest_row = driver.tail(1)
+        latest = latest_row.iloc[0]
+
+        first_year = int(driver["Year"].min())
+        last_year = int(driver["Year"].max())
+        latest_year = int(self.sessions["Year"].max())
+        latest_team = str(latest.TeamName)
+        total_points = float(driver["Points"].sum())
+        race_count = int(classified_races[["Year", "RoundNumber"]].drop_duplicates().shape[0])
+        wins = int((races["Position"] == 1).sum())
+        podiums = int((races["Position"] <= 3).sum())
+        best_finish = races["Position"].min()
+
+        seasons = f"em {first_year}" if first_year == last_year else f"de {first_year} a {last_year}"
+        best_finish_text = (
+            f"{int(best_finish)}º lugar" if pd.notna(best_finish) else "sem resultado de corrida registrado"
+        )
+
+        current_points = 0.0
+        standing_index = 0
+        if last_year == latest_year:
+            current_season = self.sessions[self.sessions["Year"].eq(latest_year)].copy()
+            standings = (
+                current_season.groupby(["FullName", "TeamName"], as_index=False)["Points"]
+                .sum()
+                .sort_values("Points", ascending=False)
+                .reset_index(drop=True)
+            )
+            standing_row = standings[standings["FullName"].eq(driver_name)]
+            if not standing_row.empty:
+                standing_index = int(standing_row.index[0]) + 1
+                current_points = float(standing_row.iloc[0]["Points"])
+
+        achievements = []
+        if wins:
+            achievements.append(_plural(wins, "vitória", "vitórias"))
+        if podiums:
+            achievements.append(_plural(podiums, "pódio", "pódios"))
+        if not achievements:
+            achievements.append(f"melhor chegada em {best_finish_text}")
+
+        achievement_text = ", ".join(achievements)
+        total_points_text = _plural(total_points, "ponto", "pontos")
+        race_count_text = _plural(race_count, "corrida", "corridas")
+        current_points_text = _plural(current_points, "ponto", "pontos")
+        if last_year == latest_year:
+            if wins or podiums >= 10:
+                return (
+                    f"{driver_name} é um piloto de Fórmula 1 e atualmente corre pela {latest_team}. "
+                    f"Na carreira, soma {total_points_text}, {race_count_text}, "
+                    f"{achievement_text}. Em {latest_year}, tem {current_points_text} "
+                    f"e está em {standing_index}º no campeonato de pilotos."
+                )
+
+            return (
+                f"{driver_name} é um piloto de Fórmula 1 que atualmente corre pela {latest_team}. "
+                f"Ele está no grid {seasons} e ainda está construindo sua trajetória "
+                f"na categoria. Até aqui, tem {total_points_text}, {race_count_text} "
+                f"e {achievement_text}. Em {latest_year}, soma {current_points_text} "
+                f"e ocupa a {standing_index}ª posição no campeonato de pilotos."
+            )
+
+        if wins or podiums >= 10:
+            return (
+                f"{driver_name} foi um piloto de Fórmula 1 {seasons}. "
+                f"Ele marcou época pela consistência e pelos resultados: {total_points_text}, "
+                f"{race_count_text}, {achievement_text}. Sua equipe mais recente na categoria "
+                f"foi {latest_team}."
+            )
+
+        return (
+            f"{driver_name} foi um piloto de Fórmula 1 {seasons}. "
+            f"Passou pela equipe {latest_team} no fim de sua passagem pela categoria e acumulou "
+            f"{total_points_text} em {race_count_text}, com {achievement_text}."
+        )
+
     def _predict_with_local_model(self) -> pd.DataFrame | None:
         try:
             from sklearn.ensemble import RandomForestClassifier
@@ -442,7 +625,11 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
 
         model.fit(training[features], training["Champion"])
         current = current.copy()
-        current["ChampionProbability"] = model.predict_proba(current[features])[:, 1]
+        current["ModelChampionProbability"] = model.predict_proba(current[features])[:, 1]
+        current = self._apply_championship_reality_adjustment(
+            current,
+            current["ModelChampionProbability"],
+        )
         return current.sort_values("ChampionProbability", ascending=False).reset_index(drop=True)
 
     def _predict_with_points_trend(self) -> pd.DataFrame:
@@ -457,11 +644,8 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
             + current["Podiums"] * 3.0
             + current["AvgPointsPerRound"] * 4.0
         )
-        score_sum = current["Score"].clip(lower=0).sum()
-        if score_sum <= 0:
-            current["ChampionProbability"] = 1 / len(current)
-        else:
-            current["ChampionProbability"] = current["Score"].clip(lower=0) / score_sum
+        current["ModelChampionProbability"] = current["Score"]
+        current = self._apply_championship_reality_adjustment(current, current["Score"])
         return current.sort_values("ChampionProbability", ascending=False).reset_index(drop=True)
 
     def _build_champion_abt(
@@ -473,6 +657,9 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         training_rows = []
 
         for year in years:
+            if self.sessions[self.sessions["Year"] == year - 1].empty:
+                continue
+
             year_rounds = sorted(self.sessions[self.sessions["Year"] == year]["RoundNumber"].unique())
             if not year_rounds:
                 continue
@@ -481,6 +668,8 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
             max_round = max(year_rounds)
             for round_number in year_rounds:
                 summary = self._feature_table_for_round(year, int(round_number), max_round)
+                if summary.empty:
+                    continue
                 summary["Champion"] = (summary["FullName"] == champion).astype(int)
                 training_rows.append(summary)
 
@@ -495,11 +684,23 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
             "Podiums",
             "AvgFinish",
             "AvgGrid",
+            "RaceEntries",
+            "ClassifiedRaces",
+            "FinishRate",
+            "NonFinishRate",
+            "DidNotFinish",
+            "DidNotStart",
+            "PointlessRaceRate",
+            "PointsGapToLeader",
+            "PointsShareOfLeader",
             "PrevPoints",
             "PrevWins",
             "PrevPodiums",
             "PrevAvgFinish",
             "PrevAvgGrid",
+            "PrevFinishRate",
+            "PrevNonFinishRate",
+            "PrevPointlessRaceRate",
         ]
         return training, current, features
 
@@ -517,10 +718,23 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
                 "Podiums": "PrevPodiums",
                 "AvgFinish": "PrevAvgFinish",
                 "AvgGrid": "PrevAvgGrid",
+                "FinishRate": "PrevFinishRate",
+                "NonFinishRate": "PrevNonFinishRate",
+                "PointlessRaceRate": "PrevPointlessRaceRate",
             }
         )
         previous = previous[
-            ["FullName", "PrevPoints", "PrevWins", "PrevPodiums", "PrevAvgFinish", "PrevAvgGrid"]
+            [
+                "FullName",
+                "PrevPoints",
+                "PrevWins",
+                "PrevPodiums",
+                "PrevAvgFinish",
+                "PrevAvgGrid",
+                "PrevFinishRate",
+                "PrevNonFinishRate",
+                "PrevPointlessRaceRate",
+            ]
         ]
 
         features = current.merge(previous, on="FullName", how="left")
@@ -545,6 +759,15 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
                     "Podiums",
                     "AvgFinish",
                     "AvgGrid",
+                    "RaceEntries",
+                    "ClassifiedRaces",
+                    "FinishRate",
+                    "NonFinishRate",
+                    "DidNotFinish",
+                    "DidNotStart",
+                    "PointlessRaceRate",
+                    "PointsGapToLeader",
+                    "PointsShareOfLeader",
                 ]
             )
 
@@ -557,6 +780,11 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         race_stats = (
             races.groupby("FullName", as_index=False)
             .agg(
+                RaceEntries=("RoundNumber", "nunique"),
+                ClassifiedRaces=("IsClassified", "sum"),
+                DidNotFinish=("DidNotFinish", "sum"),
+                DidNotStart=("DidNotStart", "sum"),
+                PointlessRaces=("Points", lambda s: (s <= 0).sum()),
                 Wins=("Position", lambda s: (s == 1).sum()),
                 Podiums=("Position", lambda s: (s <= 3).sum()),
                 AvgFinish=("Position", "mean"),
@@ -566,9 +794,65 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
 
         summary = points.merge(race_stats, on="FullName", how="left")
         summary["AvgPointsPerRound"] = summary["Points"] / summary["Rounds"].clip(lower=1)
-        for col in ["Wins", "Podiums"]:
+        for col in [
+            "RaceEntries",
+            "ClassifiedRaces",
+            "DidNotFinish",
+            "DidNotStart",
+            "PointlessRaces",
+            "Wins",
+            "Podiums",
+        ]:
             summary[col] = summary[col].fillna(0)
-        return summary.drop(columns=["Rounds"])
+        race_entries = summary["RaceEntries"].clip(lower=1)
+        summary["FinishRate"] = summary["ClassifiedRaces"] / race_entries
+        summary["NonFinishRate"] = (summary["DidNotFinish"] + summary["DidNotStart"]) / race_entries
+        summary["PointlessRaceRate"] = summary["PointlessRaces"] / race_entries
+        leader_points = summary["Points"].max()
+        if leader_points > 0:
+            summary["PointsGapToLeader"] = leader_points - summary["Points"]
+            summary["PointsShareOfLeader"] = summary["Points"] / leader_points
+        else:
+            summary["PointsGapToLeader"] = 0.0
+            summary["PointsShareOfLeader"] = 0.0
+        return summary.drop(columns=["Rounds", "PointlessRaces"])
+
+    def _apply_championship_reality_adjustment(
+        self,
+        current: pd.DataFrame,
+        raw_score: pd.Series,
+    ) -> pd.DataFrame:
+        current = current.copy()
+        raw_strength = pd.to_numeric(raw_score, errors="coerce").fillna(0).clip(lower=0)
+        raw_max = raw_strength.max()
+        if raw_max > 0:
+            raw_strength = raw_strength / raw_max
+
+        points_strength = current["PointsShareOfLeader"].fillna(0).clip(lower=0, upper=1)
+        max_avg_points = current["AvgPointsPerRound"].max()
+        if max_avg_points > 0:
+            pace_strength = (current["AvgPointsPerRound"] / max_avg_points).fillna(0).clip(0, 1)
+        else:
+            pace_strength = pd.Series(0.0, index=current.index)
+
+        finish_strength = current["FinishRate"].fillna(0).clip(lower=0, upper=1)
+        non_finish_rate = current["NonFinishRate"].fillna(0).clip(lower=0, upper=1)
+
+        score = (
+            raw_strength * 0.15
+            + points_strength.pow(2) * 0.50
+            + pace_strength * 0.20
+            + finish_strength * 0.15
+        )
+        reliability_multiplier = (0.45 + finish_strength * 0.55) * (1 - non_finish_rate * 0.35)
+        current["ChampionScore"] = score * reliability_multiplier
+
+        score_sum = current["ChampionScore"].clip(lower=0).sum()
+        if score_sum <= 0:
+            current["ChampionProbability"] = 1 / len(current) if len(current) else 0.0
+        else:
+            current["ChampionProbability"] = current["ChampionScore"].clip(lower=0) / score_sum
+        return current
 
     def _season_champion(self, year: int) -> str:
         standings = (
@@ -578,6 +862,80 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
             .sort_values(ascending=False)
         )
         return standings.index[0] if not standings.empty else ""
+
+    def _match_driver_name(self, query: str) -> str | None:
+        normalized_query = _normalize_text(query)
+        query_tokens = set(re.findall(r"[a-z0-9]+", normalized_query))
+        if not query_tokens:
+            return None
+
+        full_name_aliases = {
+            "ayrton senna": "Ayrton Senna",
+            "bruno senna": "Bruno Senna",
+            "michael schumacher": "Michael Schumacher",
+            "ralf schumacher": "Ralf Schumacher",
+            "mick schumacher": "Mick Schumacher",
+            "max verstappen": "Max Verstappen",
+            "jos verstappen": "Jos Verstappen",
+        }
+        for alias, full_name in full_name_aliases.items():
+            if alias in normalized_query:
+                return full_name
+
+        surname_aliases = {
+            "senna": "Ayrton Senna",
+            "schumacher": "Michael Schumacher",
+        }
+        for surname, full_name in surname_aliases.items():
+            if surname in query_tokens:
+                return full_name
+
+        candidates = []
+        driver_rows = (
+            self.sessions[["FullName", "DriverId", "Abbreviation", "Year"]]
+            .drop_duplicates()
+            .dropna(subset=["FullName"])
+        )
+
+        for full_name, group in driver_rows.groupby("FullName"):
+            full_name_norm = _normalize_text(full_name)
+            name_parts = [part for part in full_name_norm.split() if len(part) >= 4]
+            last_name = name_parts[-1] if name_parts else ""
+
+            score = 0
+            if full_name_norm and full_name_norm in normalized_query:
+                score = max(score, 8)
+            if last_name and last_name in query_tokens:
+                score = max(score, 6)
+            if any(part in query_tokens for part in name_parts):
+                score = max(score, 4)
+
+            for row in group.itertuples():
+                driver_id = _normalize_text(row.DriverId)
+                abbreviation = _normalize_text(row.Abbreviation)
+                if driver_id and (driver_id in normalized_query or driver_id in query_tokens):
+                    driver_id_score = 7 if "_" in driver_id or " " in driver_id else 6
+                    score = max(score, driver_id_score)
+                if abbreviation and len(abbreviation) >= 3 and abbreviation in query_tokens:
+                    score = max(score, 5)
+
+            if score:
+                candidates.append((score, int(group["Year"].max()), len(group), str(full_name)))
+
+        if not candidates:
+            return None
+
+        candidates.sort(reverse=True)
+        return candidates[0][3]
+
+    @staticmethod
+    def _is_latest_race_winner_question(text: str) -> bool:
+        normalized = _normalize_text(text)
+        winner_terms = ["quem ganhou", "quem venceu", "vencedor", "ganhador"]
+        latest_terms = ["ultima corrida", "ultimo gp", "corrida mais recente", "gp mais recente"]
+        return any(term in normalized for term in winner_terms) and any(
+            term in normalized for term in latest_terms
+        )
 
     @staticmethod
     def _extract_year(text: str) -> int | None:

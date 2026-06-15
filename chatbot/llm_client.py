@@ -1,5 +1,6 @@
 import os
 import time
+import re
  
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
@@ -18,8 +19,13 @@ _model_path = None
 _SYSTEM_PROMPT = """\
 Você é o "F1 Bot", um especialista apaixonado em Fórmula 1.
 Responda SEMPRE em português brasileiro, de forma amigável e precisa.
-Seja conciso: no máximo 10 parágrafos por resposta.
-Use as estatísticas abaixo para embasar análises e previsões.
+Responda somente à pergunta atual do usuário. Não continue nem reescreva uma
+resposta anterior da conversa.
+Seja conciso: no máximo 2 parágrafos por resposta.
+Para perguntas conceituais, explique somente o que é e para que serve. Não cite
+origem, ano, equipe, inventor, responsável ou detalhes históricos a menos que a
+pergunta peça explicitamente isso.
+Use as estatísticas abaixo apenas quando elas forem relevantes para a pergunta.
 Nunca invente dados — se não souber, diga claramente.
 Não mencione arquivos, parquet, pasta data, base estruturada, contexto interno,
 fallback ou detalhes de implementação. Para o usuário, você simplesmente conhece F1.
@@ -122,8 +128,23 @@ def query_llm(
  
         messages = [{"role": "system", "content": system_content}]
         if history:
-            messages.extend(history[-8:])
-        messages.append({"role": "user", "content": user_message})
+            messages.extend(history[-2:])
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Pergunta atual. Responda esta pergunta diretamente e ignore assuntos "
+                    "anteriores que não sejam necessários.\n"
+                    "Regras obrigatórias para esta resposta:\n"
+                    "- Se for uma pergunta conceitual do tipo 'o que é' ou 'como funciona', "
+                    "explique apenas o conceito e a função prática.\n"
+                    "- Não cite ano, equipe, inventor, origem ou histórico, a menos que a "
+                    "pergunta peça isso explicitamente.\n"
+                    "- Se for uma pergunta sobre cargo, responda o nome e o cargo de forma direta.\n\n"
+                    f"Pergunta: {user_message}"
+                ),
+            }
+        )
  
         prompt_text = tokenizer.apply_chat_template(
             messages,
@@ -144,10 +165,8 @@ def query_llm(
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=300,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
+                max_new_tokens=120,
+                do_sample=False,
                 repetition_penalty=1.15,
                 pad_token_id=tokenizer.eos_token_id,
             )
@@ -155,6 +174,7 @@ def query_llm(
  
         new_tokens = outputs[0][prompt_len:]
         response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        response = _trim_direct_answer(user_message, response)
  
         print(f"[LLM] Respondeu em {elapsed:.1f}s ({len(new_tokens)} tokens)")
         return response, True
@@ -169,6 +189,33 @@ def _fallback_response() -> str:
         "Não consegui gerar uma resposta agora. "
         "Tente perguntar sobre DRS, pit stop, pilotos ou equipes da F1!"
     )
+
+
+def _trim_direct_answer(user_message: str, response: str) -> str:
+    question = user_message.strip().lower()
+    direct_patterns = [
+        r"^o que (é|e|significa)\b",
+        r"^como funciona\b",
+        r"^quem é o chefe\b",
+        r"^quem e o chefe\b",
+        r"^quem é a chefe\b",
+        r"^quem e a chefe\b",
+        r"^qual é o chefe\b",
+        r"^qual e o chefe\b",
+    ]
+    if not any(re.search(pattern, question) for pattern in direct_patterns):
+        return response
+
+    clean = re.sub(r"\s+", " ", response).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    if not sentences:
+        return clean
+
+    first = sentences[0].strip()
+    if re.search(r"\b(este sistema consistia|componentes principais|1\.|2\.|3\.)\b", first, re.I):
+        return clean
+
+    return first
  
  
 def check_connection() -> bool:

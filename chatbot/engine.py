@@ -64,6 +64,29 @@ class F1Chatbot:
         self.history.append({"role": role, "content": content})
         self.history = self.history[-8:]
 
+    @staticmethod
+    def _needs_data_context(text: str) -> bool:
+        terms = [
+            "classificação",
+            "classificacao",
+            "pontuação",
+            "pontuacao",
+            "campeonato",
+            "temporada",
+            "última corrida",
+            "ultima corrida",
+            "corrida mais recente",
+            "vencedor",
+            "vitória",
+            "vitoria",
+            "pontos",
+            "previsão",
+            "previsao",
+            "predição",
+            "predicao",
+        ]
+        return any(term in text for term in terms)
+
     def get_response(self, user_input: str) -> str:
         """
         Gera a resposta do chatbot a partir da mensagem do usuário.
@@ -81,6 +104,7 @@ class F1Chatbot:
         self.context.update(entities)
 
         response = ""
+        append_hook = True
 
         if re.search(r"\b(sim|quero|claro|conta|explica|quero saber|bora|manda)\b", user_input):
             if "primeira corrida" in self.last_hook.lower():
@@ -147,15 +171,22 @@ class F1Chatbot:
             print("[ENGINE] Base estruturada sem resposta completa → acionando LLM...")
             llm_answer, _ = query_llm(
                 user_message=original_input,
-                data_context=self.data_context,
-                history=self.history,
+                data_context=self.data_context if self._needs_data_context(user_input) else "",
+                history=None,
             )
             response = llm_answer
 
-        next_hook = self._get_next_hook()
         response = response.rstrip()
         if response and response[-1] not in ".!?":
             response += "."
+
+        if not append_hook:
+            final_response = response
+            self._remember("user", original_input)
+            self._remember("assistant", final_response)
+            return final_response
+
+        next_hook = self._get_next_hook()
         
         
         connectors = [

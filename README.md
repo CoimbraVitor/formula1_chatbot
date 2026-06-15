@@ -1,131 +1,176 @@
-# 🏎️ Formula 1 Chatbot (FastF1)
+# Formula 1 Chatbot
 
-## 📌 Sobre o Projeto
+Aplicação web para consulta conversacional sobre Fórmula 1, com dados estruturados de corridas, respostas geradas por modelo local e dashboard com indicadores da temporada.
 
-O **Formula 1 Chatbot** é um assistente virtual desenvolvido para fornecer informações detalhadas sobre o mundo da Fórmula 1. Utilizando a biblioteca **FastF1**, o chatbot é capaz de acessar e processar dados oficiais das corridas para responder perguntas em tempo real ou históricas.
+## Objetivo
 
-O projeto tem como foco oferecer uma experiência interativa para fãs da Fórmula 1, permitindo consultar estatísticas, resultados e informações sobre pilotos, equipes e corridas de forma rápida e intuitiva.
+O projeto organiza dados históricos e recentes da Fórmula 1 para responder perguntas sobre pilotos, equipes, resultados, classificação e projeção do campeonato de pilotos. A aplicação combina uma base local em arquivos `.parquet` com um modelo de linguagem executado localmente para perguntas gerais sobre a categoria.
 
-## 🎯 Objetivo
+## Coleta de Dados
 
-O objetivo do chatbot é **facilitar o acesso a dados da Fórmula 1**, transformando informações técnicas e complexas em respostas simples e acessíveis através de uma interface conversacional.
+Os dados são obtidos pelo script `collect.py`, utilizando a biblioteca `FastF1`. O processo coleta sessões de corrida e sprint, adiciona metadados do evento e grava os resultados em `data/` no formato `.parquet`.
 
-## 💡 Conceito
+Exemplo de atualização da temporada:
 
-O chatbot atua como um **assistente inteligente para fãs de Fórmula 1**, sendo capaz de interpretar perguntas e retornar dados relevantes com base nas informações obtidas via FastF1.
+```bash
+python collect.py --years 2026 --modes R S
+```
 
-Entre as principais interações esperadas, estão:
+Cada arquivo segue o padrão:
 
-- Consulta de **resultados de corridas**
-- Informações sobre **classificações (qualifying)**
-- Dados de **pilotos e equipes**
-- Comparação de desempenho entre pilotos
-- Informações sobre **voltas rápidas e telemetria**
-- Estatísticas de temporadas e corridas específicas
+```text
+data/{ano}_{etapa}_{modo}.parquet
+```
 
-## ⚙️ Tecnologia Base
+Exemplos:
 
-O projeto utiliza a biblioteca **FastF1**, que fornece acesso a dados detalhados da Fórmula 1, incluindo:
+- `data/2026_07_R.parquet`
+- `data/2026_05_S.parquet`
 
-- Tempos de volta
-- Telemetria
-- Dados de sessões (treinos, classificação e corrida)
-- Informações de clima e pista
+## Tratamento dos Dados
 
-Esses dados são processados pelo chatbot para gerar respostas dinâmicas e informativas.
+O carregamento dos dados é feito em `chatbot/data_loader.py`. O pipeline local possui três etapas principais:
 
-## 🧠 Funcionamento
+- **Leitura:** carregamento dos arquivos `.parquet` de corridas e sprints.
+- **Normalização:** conversão de tipos, padronização de nomes, datas, equipes, pontuação e posições.
+- **Métricas derivadas:** cálculo de vitórias, pódios, média de chegada, média de largada, pontos por etapa, taxa de finalização e abandonos.
 
-O fluxo básico do chatbot segue os seguintes passos:
+Também são preservadas informações como `Status`, `ClassifiedPosition` e `Laps`, usadas para diferenciar chegada, abandono e ausência de largada.
 
-1. O usuário faz uma pergunta (ex: “Quem venceu o GP de Mônaco de 2023?”)
-2. O chatbot interpreta a intenção da pergunta
-3. O sistema consulta primeiro a base local estruturada em `data/`
-4. Se a base local não tiver informação suficiente, o LLM é usado como fallback
-5. A resposta é processada e retornada ao usuário de forma clara
+## Funcionamento do Chatbot
 
-No código, os dados importados ficam organizados em camadas:
+O chatbot segue uma ordem de resposta definida:
 
-- **Bronze:** leitura direta dos arquivos `.parquet`
-- **Silver:** normalização de tipos, nomes, datas, posições e pontuação
-- **ABT local:** tabela analítica usada para treinar a predição do campeão de pilotos
+1. Validação da mensagem recebida.
+2. Consulta à base estruturada para perguntas com resposta direta nos dados locais.
+3. Uso do modelo de linguagem local para perguntas gerais sobre Fórmula 1.
+4. Inclusão de um hook conversacional ao final da resposta para manter a interação ativa.
 
-## 🤖 LLM utilizado
+Consultas estruturadas cobrem casos como:
 
-O fallback generativo usa o modelo [`Qwen/Qwen2.5-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct), disponível no Hugging Face.
+- classificação de pilotos;
+- vencedor da corrida mais recente;
+- vencedores recentes;
+- perfil básico de pilotos presentes nos dados;
+- previsão do campeonato de pilotos.
 
-Esse modelo foi mantido porque é uma boa escolha para o contexto do trabalho: é pequeno o bastante para rodar localmente em máquinas comuns, é ajustado para seguir instruções, tem suporte a português e lida bem com dados estruturados no prompt. Modelos maiores, como `Qwen/Qwen2.5-3B-Instruct`, podem responder melhor, mas aumentam bastante o custo de memória e tempo de execução para um projeto de faculdade.
+Perguntas conceituais, técnicas ou abertas são encaminhadas ao modelo de linguagem.
 
-Para testar outro modelo compatível com `transformers`, execute definindo a variável:
+## Modelo de Linguagem
+
+O fallback generativo utiliza o modelo `Qwen/Qwen2.5-1.5B-Instruct` por meio da biblioteca `transformers`.
+
+O modelo é carregado localmente na inicialização da aplicação, salvo quando o preload é desativado por variável de ambiente. A geração foi configurada para priorizar respostas determinísticas e focadas na pergunta atual.
+
+Para usar outro modelo compatível com `transformers`:
 
 ```bash
 F1_LLM_MODEL_ID="Qwen/Qwen2.5-3B-Instruct" python app.py
 ```
 
-### Download do modelo
-
-Ao executar `python app.py`, o projeto baixa/carrega o modelo do Hugging Face antes de iniciar o Flask. Para evitar limite de requisições anônimas e melhorar a velocidade, crie um token de leitura em <https://huggingface.co/settings/tokens> e autentique uma vez no terminal:
+Para desativar o carregamento inicial do modelo:
 
 ```bash
-huggingface-cli login
+F1_PRELOAD_LLM=0 python app.py
 ```
 
-Também é possível usar variável de ambiente diretamente no terminal:
+## Predição do Campeonato de Pilotos
 
-```bash
-export HF_TOKEN=hf_seu_token_aqui
-python app.py
+A aplicação monta uma tabela analítica por piloto e etapa para treinar um modelo local de classificação. O modelo usa temporadas anteriores como histórico e aplica a projeção sobre a temporada mais recente.
+
+As principais variáveis usadas na predição incluem:
+
+- pontos acumulados;
+- média de pontos por etapa;
+- vitórias;
+- pódios;
+- média de chegada;
+- média de largada;
+- desempenho da temporada anterior;
+- taxa de finalização;
+- abandonos e ausências de largada;
+- distância em pontos para o líder.
+
+O modelo principal é um `RandomForestClassifier`. Após a previsão inicial, a pontuação é recalibrada com sinais da temporada atual para evitar superestimar pilotos com bom histórico, mas baixa consistência ou muitos abandonos no ano corrente.
+
+## Dashboard
+
+A interface possui uma aba de dashboard com:
+
+- piloto projetado como favorito ao campeonato;
+- probabilidades dos principais candidatos;
+- classificação atual de pilotos;
+- vencedores recentes;
+- vitórias por equipe na temporada;
+- resumo da temporada carregada.
+
+As vitórias por equipe são calculadas apenas sobre a temporada mais recente disponível, não sobre todo o histórico.
+
+## Estrutura do Projeto
+
+```text
+.
+├── app.py
+├── collect.py
+├── chatbot/
+│   ├── data_loader.py
+│   ├── engine.py
+│   ├── hooks.py
+│   ├── intents.py
+│   ├── llm_client.py
+│   └── reflections.py
+├── data/
+├── static/
+│   ├── script.js
+│   └── style.css
+├── templates/
+│   └── index.html
+├── requirements.txt
+└── test_llm.py
 ```
 
-Se quiser cancelar um download em andamento, pressione `Ctrl+C` no terminal. Ao executar novamente, o Hugging Face normalmente reaproveita o que já ficou em cache e continua o download.
+## Tecnologias
 
-## 🏆 Predição do campeonato de pilotos
-
-O chatbot consegue projetar o próximo campeão de pilotos usando um modelo treinado localmente com os dados importados via FastF1.
-
-Perguntas sugeridas:
-
-- `Prever campeão do campeonato de pilotos`
-- `Classificação dos pilotos em 2026`
-
-A previsão segue a ideia do projeto [`speed-f1`](https://github.com/TeoMeWhy/speed-f1), mas sem Spark, MLflow ou armazenamento em nuvem. A aplicação monta uma ABT com pandas e treina uma `RandomForestClassifier` local usando temporadas anteriores. A resposta ao usuário fica em linguagem natural, sem expor detalhes internos de arquivos ou pipeline.
-
-Além da conversa, a interface possui uma aba **Dashboard** com a predição do campeão, barras comparando os principais candidatos, classificação atual, vencedores recentes e vitórias por equipe.
-
-## 👥 Público-Alvo
-
-Este projeto é voltado para:
-
-- Fãs de Fórmula 1
-- Entusiastas de análise de dados esportivos
-- Desenvolvedores interessados em aplicações com dados esportivos
-
-## Tecnologias utilizadas
 - Python
 - Flask
 - Pandas
+- FastF1
 - scikit-learn
 - Transformers
-- HTML/CSS/JavaScript
+- PyTorch
+- HTML
+- CSS
+- JavaScript
 
-## Como executar
-1. Clone o repositório
-2. Crie um ambiente virtual
-3. Instale as dependências:
-   pip install -r requirements.txt
-4. Execute:
-   python app.py
+## Execução
 
-## Estrutura do projeto
-- `app.py`: inicialização da aplicação Flask
-- `chatbot/engine.py`: lógica principal do chatbot
-- `templates/`: interface HTML
-- `static/`: arquivos estáticos
+Criar e ativar um ambiente virtual:
 
-## Funcionalidades atuais
-- Interface web de chat
-- Conversa livre com LLM local como fallback
-- Consulta prévia à base estruturada de F1
-- Predição local do campeonato de pilotos
-- Dashboard com gráfico de predição e recortes estatísticos
-- Contexto básico de conversa sobre Fórmula 1
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+
+Instalar dependências:
+
+```bash
+pip install -r requirements.txt
+```
+
+Executar a aplicação:
+
+```bash
+python app.py
+```
+
+Depois da inicialização, a interface fica disponível no endereço exibido pelo Flask.
+
+## Funcionalidades
+
+- Chat web sobre Fórmula 1.
+- Respostas estruturadas a partir dos dados locais.
+- Fallback generativo com LLM local.
+- Perfis básicos de pilotos.
+- Consulta de classificação e vencedores recentes.
+- Predição local do campeonato de pilotos.
+- Dashboard com recortes da temporada atual.
