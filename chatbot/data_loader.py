@@ -225,9 +225,10 @@ class F1DataKnowledgeBase:
         if self._is_recent_winners_question(text):
             return self.recent_winners()
 
-        driver_profile = self.driver_profile(user_input)
-        if driver_profile:
-            return driver_profile
+        if self._is_driver_profile_question(text):
+            driver_profile = self.driver_profile(user_input)
+            if driver_profile:
+                return driver_profile
 
         return None
 
@@ -936,6 +937,39 @@ FORMA RECENTE — EQUIPES ({int(last_two[0])}–{int(last_two[1])}):
         return any(term in normalized for term in winner_terms) and any(
             term in normalized for term in latest_terms
         )
+
+    @staticmethod
+    def _is_driver_profile_question(text: str) -> bool:
+        normalized = _normalize_text(text)
+        comparison_terms = [
+            "quem e melhor",
+            "quem foi melhor",
+            "melhor que",
+            "versus",
+            " vs ",
+            " ou ",
+            "compar",
+            "maior que",
+            "pior que",
+        ]
+        if any(term in f" {normalized} " for term in comparison_terms):
+            return False
+
+        profile_terms = [
+            "quem e",
+            "quem foi",
+            "me fale sobre",
+            "fale sobre",
+            "conte sobre",
+            "perfil de",
+            "carreira de",
+            "historia de",
+        ]
+        if any(term in normalized for term in profile_terms):
+            return True
+
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        return 1 <= len(tokens) <= 3
 
     @staticmethod
     def _extract_year(text: str) -> int | None:
