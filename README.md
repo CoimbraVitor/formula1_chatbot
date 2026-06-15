@@ -56,6 +56,57 @@ Consultas estruturadas cobrem casos como:
 
 Perguntas conceituais, técnicas ou abertas são encaminhadas ao modelo de linguagem.
 
+## Justificativas Técnicas
+
+### Escolha do modelo do Hugging Face
+
+O projeto utiliza o modelo `Qwen/Qwen2.5-1.5B-Instruct` porque ele equilibra qualidade de resposta, custo computacional e facilidade de execução local. Por ser um modelo instruct, ele já é otimizado para seguir comandos em formato conversacional, o que combina com a proposta de um chatbot sobre Fórmula 1. O tamanho de 1.5B parâmetros também permite rodar em máquinas sem infraestrutura dedicada de GPU, mantendo o projeto reproduzível para desenvolvimento, testes e apresentação.
+
+A integração via Hugging Face e `transformers` foi escolhida por oferecer um fluxo padronizado de download, cache, tokenização e inferência. Isso também facilita trocar o modelo por outro compatível no futuro usando a variável `F1_LLM_MODEL_ID`, sem alterar a arquitetura principal do chatbot.
+
+### Construção do agente
+
+O agente foi construído como uma camada de orquestração entre entrada do usuário, base estruturada e modelo generativo. A classe `F1Chatbot` mantém contexto simples da conversa, identifica entidades básicas, controla hooks conversacionais e decide qual fonte deve responder cada pergunta.
+
+Essa abordagem evita depender exclusivamente do LLM para tudo. Perguntas com resposta objetiva, como classificação, vencedor recente ou projeção do campeonato, são tratadas primeiro pela base local. Isso reduz alucinações e garante que respostas estatísticas sejam derivadas dos dados carregados. O LLM fica responsável por perguntas abertas, conceituais ou explicativas, nas quais a linguagem natural é mais importante que uma consulta tabular.
+
+### Implementação da lógica de decisão: base para LLM
+
+A lógica segue um fluxo em camadas:
+
+1. A mensagem é validada e normalizada.
+2. O agente tenta resolver a pergunta com regras conversacionais e contexto já conhecido.
+3. A base estruturada é consultada para intents ligadas a dados de corrida, pontuação, vencedores, pilotos e predição.
+4. Se a base não produzir uma resposta completa, a pergunta é enviada ao LLM local.
+5. Quando necessário, um resumo estatístico da base é incluído no prompt para orientar o modelo sem expor detalhes internos ao usuário.
+
+Essa ordem foi escolhida porque dados estruturados são mais confiáveis para fatos mensuráveis, enquanto o LLM é mais adequado para explicar conceitos e responder perguntas menos previsíveis.
+
+### Integração com APIs ou base externa
+
+A coleta de dados usa a biblioteca `FastF1`, que fornece acesso a dados oficiais e históricos de sessões da Fórmula 1. O script `collect.py` busca corridas e sprints por ano e etapa, adiciona metadados do evento e salva os resultados localmente.
+
+Após a coleta, a aplicação passa a operar sobre uma base local em `data/`. Isso diminui a dependência de chamadas externas durante o uso do chatbot, melhora o tempo de resposta e torna o comportamento mais estável mesmo quando há instabilidade de rede ou limitação de acesso à fonte original.
+
+### Arquitetura do sistema
+
+A arquitetura foi separada em responsabilidades claras:
+
+- `app.py`: camada web Flask, rotas de chat e dashboard.
+- `collect.py`: coleta e persistência dos dados da Fórmula 1.
+- `chatbot/data_loader.py`: leitura, normalização, métricas, respostas estruturadas e predição.
+- `chatbot/engine.py`: orquestração do agente e decisão entre base estruturada e LLM.
+- `chatbot/llm_client.py`: carregamento e inferência do modelo Hugging Face.
+- `templates/` e `static/`: interface web, estilos e scripts do dashboard.
+
+Essa divisão facilita manutenção e evolução. A coleta pode ser atualizada sem alterar a interface, o modelo pode ser trocado sem reescrever a lógica do agente, e novas consultas estruturadas podem ser adicionadas na base sem depender de mudanças no front-end.
+
+### Motivo de utilização de Parquet
+
+O formato `.parquet` foi utilizado por ser eficiente para dados tabulares analíticos. Ele armazena os dados em formato colunar, o que melhora leitura, compressão e processamento com Pandas quando comparado a formatos textuais como CSV.
+
+No contexto do projeto, os dados de corridas possuem várias colunas numéricas, categóricas e temporais. O Parquet preserva melhor os tipos de dados, reduz o tamanho dos arquivos e acelera o carregamento da base local. Isso é importante porque o chatbot consulta esses dados na inicialização e usa a base para gerar métricas, rankings, vencedores recentes e features do modelo de predição.
+
 ## Modelo de Linguagem
 
 O fallback generativo utiliza o modelo `Qwen/Qwen2.5-1.5B-Instruct` por meio da biblioteca `transformers`.
